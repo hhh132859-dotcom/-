@@ -139,7 +139,7 @@ function ticketPanelRow() {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId("ticket:open")
-      .setLabel("Open a ticket")
+      .setLabel("فتح")
       .setStyle(ButtonStyle.Primary),
   );
 }
@@ -199,10 +199,7 @@ async function postTicketPanel(
 
   const panel = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle("Need help?")
-    .setDescription(
-      "Open a private support ticket. Only you and the support team can see it.",
-    );
+    .setDescription("اهلاً وسهلاً لطلب اضغط على زر فتح");
 
   await channel.send({ embeds: [panel], components: [ticketPanelRow()] });
   await replyPrivately(interaction, "Ticket panel posted.");
