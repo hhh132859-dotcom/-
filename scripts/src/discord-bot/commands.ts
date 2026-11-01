@@ -123,4 +123,42 @@ export const commandData = [
         .setName("show")
         .setDescription("Show this server's current moderation settings."),
     ),
+  new SlashCommandBuilder()
+    .setName("ticket-config")
+    .setDescription("Configure this server's support tickets.")
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("support-role")
+        .setDescription("Choose which role can view and answer tickets.")
+        .addRoleOption((option) =>
+          option
+            .setName("role")
+            .setDescription("Support team role")
+            .setRequired(true),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("category")
+        .setDescription("Choose a category for new tickets, or clear it.")
+        .addChannelOption((option) =>
+          option
+            .setName("category")
+            .setDescription("Category for new ticket channels")
+            .addChannelTypes(ChannelType.GuildCategory)
+            .setRequired(false),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("show")
+        .setDescription("Show the ticket support role and category."),
+    ),
+  new SlashCommandBuilder()
+    .setName("ticket-panel")
+    .setDescription("Post a button panel for opening support tickets.")
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map((command) => command.toJSON());

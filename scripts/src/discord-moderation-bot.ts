@@ -1,10 +1,16 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType,
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
   PermissionFlagsBits,
   type ChatInputCommandInteraction,
+  type ButtonInteraction,
   type Client as DiscordClient,
   type Message,
 } from "discord.js";
@@ -12,10 +18,18 @@ import pino from "pino";
 import { commandData } from "./discord-bot/commands";
 import {
   getGuildSettings,
+  getTicketById,
+  getTicketSettings,
+  findOpenTicketForUser,
   pool,
   saveCase,
   saveLogChannel,
   saveSpamSettings,
+  saveTicketCategory,
+  saveTicketSupportRole,
+  createTicket,
+  closeTicket,
+  reopenTicket,
 } from "./discord-bot/storage";
 
 const logger = pino({ level: process.env["LOG_LEVEL"] ?? "info" });
@@ -111,7 +125,7 @@ async function recordAndLog(
 }
 
 async function replyPrivately(
-  interaction: ChatInputCommandInteraction,
+  interaction: ChatInputCommandInteraction | ButtonInteraction,
   content: string,
 ): Promise<void> {
   if (interaction.replied || interaction.deferred) {
@@ -119,6 +133,388 @@ async function replyPrivately(
     return;
   }
   await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+}
+
+function ticketPanelRow() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket:open")
+      .setLabel("Open a ticket")
+      .setStyle(ButtonStyle.Primary),
+  );
+}
+
+function ticketActionRow(ticketId: number, reopen = false) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`ticket:${reopen ? "reopen" : "close"}:${ticketId}`)
+      .setLabel(reopen ? "Reopen ticket" : "Close ticket")
+      .setStyle(reopen ? ButtonStyle.Success : ButtonStyle.Danger),
+  );
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505"
+  );
+}
+
+function ticketChannelName(username: string): string {
+  const safeName = username
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+  return `ticket-${safeName || "member"}`;
+}
+
+async function postTicketPanel(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const guild = requireGuild(interaction);
+  requirePermission(interaction, PermissionFlagsBits.ManageGuild, "Manage Server");
+  const settings = await getTicketSettings(guild.id);
+
+  if (!settings.supportRoleId) {
+    throw new Error("Set a support role first with /ticket-config support-role.");
+  }
+
+  const supportRole = await guild.roles.fetch(settings.supportRoleId);
+  if (!supportRole) {
+    throw new Error("The configured support role no longer exists. Set it again.");
+  }
+
+  const channel = interaction.channel;
+  if (
+    !channel ||
+    !("send" in channel) ||
+    typeof channel.send !== "function"
+  ) {
+    throw new Error("Use /ticket-panel in a server text channel.");
+  }
+
+  const panel = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle("Need help?")
+    .setDescription(
+      "Open a private support ticket. Only you and the support team can see it.",
+    );
+
+  await channel.send({ embeds: [panel], components: [ticketPanelRow()] });
+  await replyPrivately(interaction, "Ticket panel posted.");
+}
+
+async function openTicket(
+  client: DiscordClient,
+  interaction: ButtonInteraction,
+): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) throw new Error("Tickets can only be opened inside a server.");
+
+  const settings = await getTicketSettings(guild.id);
+  if (!settings.supportRoleId) {
+    throw new Error("The server has not configured a support role yet.");
+  }
+
+  const supportRole = await guild.roles.fetch(settings.supportRoleId);
+  if (!supportRole || supportRole.id === guild.id) {
+    throw new Error("The configured support role is missing or invalid.");
+  }
+
+  const existing = await findOpenTicketForUser(guild.id, interaction.user.id);
+  if (existing) {
+    const existingChannel = await guild.channels.fetch(existing.channelId);
+    if (existingChannel) {
+      await replyPrivately(
+        interaction,
+        `You already have an open ticket: <#${existing.channelId}>.`,
+      );
+      return;
+    }
+    await closeTicket(existing.id, null);
+  }
+
+  const botMember =
+    guild.members.me ??
+    (client.user ? await guild.members.fetch(client.user.id) : null);
+  if (!botMember?.permissions.has(PermissionFlagsBits.ManageChannels)) {
+    throw new Error("The bot needs Manage Channels permission to create tickets.");
+  }
+
+  let parentId: string | undefined;
+  if (settings.categoryId) {
+    const category = await guild.channels.fetch(settings.categoryId);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      throw new Error(
+        "The configured ticket category is missing. Set it again with /ticket-config category.",
+      );
+    }
+    parentId = category.id;
+  }
+
+  const channel = await guild.channels.create({
+    name: ticketChannelName(interaction.user.username),
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: `Private support ticket for ${interaction.user.id}`,
+    reason: `Support ticket opened by ${interaction.user.tag}`,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel],
+      },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+        ],
+      },
+      {
+        id: supportRole.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+        ],
+      },
+      {
+        id: botMember.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels,
+        ],
+      },
+    ],
+  });
+
+  let ticketId: number;
+  try {
+    ticketId = await createTicket({
+      guildId: guild.id,
+      channelId: channel.id,
+      openerUserId: interaction.user.id,
+      supportRoleId: supportRole.id,
+    });
+  } catch (error) {
+    await channel.delete("Ticket record could not be saved").catch((deleteError: unknown) => {
+      logger.error(
+        { err: deleteError, guildId: guild.id, channelId: channel.id },
+        "Could not clean up an unrecorded ticket channel",
+      );
+    });
+
+    if (isUniqueViolation(error)) {
+      const racedTicket = await findOpenTicketForUser(guild.id, interaction.user.id);
+      if (racedTicket) {
+        await replyPrivately(
+          interaction,
+          `You already have an open ticket: <#${racedTicket.channelId}>.`,
+        );
+        return;
+      }
+    }
+    throw error;
+  }
+
+  try {
+    await channel.send({
+      content:
+        `Welcome <@${interaction.user.id}>. <@&${supportRole.id}> will help you here. ` +
+        "Describe your request below. Use the button when the ticket is resolved.",
+      components: [ticketActionRow(ticketId)],
+      allowedMentions: { users: [interaction.user.id], roles: [supportRole.id] },
+    });
+  } catch (error) {
+    await closeTicket(ticketId, null);
+    await channel.delete("Ticket setup failed").catch((deleteError: unknown) => {
+      logger.error(
+        { err: deleteError, guildId: guild.id, channelId: channel.id },
+        "Could not clean up an uninitialized ticket channel",
+      );
+    });
+    throw error;
+  }
+
+  await replyPrivately(interaction, `Your private ticket is ready: <#${channel.id}>.`);
+}
+
+async function handleTicketButton(
+  client: DiscordClient,
+  interaction: ButtonInteraction,
+): Promise<void> {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const [, action, rawTicketId] = interaction.customId.split(":");
+  if (action === "open") {
+    await openTicket(client, interaction);
+    return;
+  }
+
+  const ticketId = Number(rawTicketId);
+  if (!Number.isSafeInteger(ticketId) || ticketId < 1) {
+    throw new Error("This ticket button is invalid.");
+  }
+
+  const guild = interaction.guild;
+  if (!guild) throw new Error("This ticket action must be used in a server.");
+
+  const ticket = await getTicketById(guild.id, ticketId);
+  if (!ticket) throw new Error("This ticket could not be found.");
+
+  const member = await guild.members.fetch(interaction.user.id);
+  const canManage = member.permissions.has(PermissionFlagsBits.ManageChannels);
+  const isSupport = member.roles.cache.has(ticket.supportRoleId);
+  const isOpener = member.id === ticket.openerUserId;
+  if (!canManage && !isSupport && !isOpener) {
+    throw new Error("Only the ticket owner and support team can do this.");
+  }
+
+  const channel = await guild.channels.fetch(ticket.channelId);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    throw new Error("The ticket channel no longer exists.");
+  }
+
+  if (action === "close") {
+    if (ticket.status !== "open") {
+      await replyPrivately(interaction, `Ticket #${ticket.id} is already closed.`);
+      return;
+    }
+
+    const closed = await closeTicket(ticket.id, interaction.user.id);
+    if (!closed) {
+      await replyPrivately(interaction, `Ticket #${ticket.id} is already closed.`);
+      return;
+    }
+
+    try {
+      await channel.permissionOverwrites.edit(ticket.openerUserId, {
+        SendMessages: false,
+        AttachFiles: false,
+        AddReactions: false,
+      });
+      await channel.permissionOverwrites.edit(ticket.supportRoleId, {
+        SendMessages: false,
+        AttachFiles: false,
+        AddReactions: false,
+      });
+      await channel.setName(`closed-ticket-${ticket.id}`);
+      await channel.send({
+        content: `Ticket #${ticket.id} was closed by <@${interaction.user.id}>. The channel is archived; use the button to reopen it.`,
+        components: [ticketActionRow(ticket.id, true)],
+        allowedMentions: { users: [interaction.user.id] },
+      });
+    } catch (error) {
+      await Promise.all([
+        channel.permissionOverwrites
+          .edit(ticket.openerUserId, {
+            SendMessages: true,
+            AttachFiles: true,
+            AddReactions: true,
+          })
+          .catch((restoreError: unknown) =>
+            logger.error(
+              { err: restoreError, ticketId: ticket.id },
+              "Could not restore ticket owner permissions after a failed close",
+            ),
+          ),
+        channel.permissionOverwrites
+          .edit(ticket.supportRoleId, {
+            SendMessages: true,
+            AttachFiles: true,
+            AddReactions: true,
+          })
+          .catch((restoreError: unknown) =>
+            logger.error(
+              { err: restoreError, ticketId: ticket.id },
+              "Could not restore support role permissions after a failed close",
+            ),
+          ),
+        channel.setName(ticketChannelName(ticket.openerUserId)).catch(
+          (restoreError: unknown) =>
+            logger.error(
+              { err: restoreError, ticketId: ticket.id },
+              "Could not restore ticket channel name after a failed close",
+            ),
+        ),
+        reopenTicket(ticket.id).catch((restoreError: unknown) =>
+          logger.error(
+            { err: restoreError, ticketId: ticket.id },
+            "Could not restore ticket state after a failed close",
+          ),
+        ),
+      ]);
+      throw new Error(
+        "The ticket could not be archived. Check the bot's Manage Channels and channel permissions.",
+      );
+    }
+
+    await replyPrivately(interaction, `Ticket #${ticket.id} is closed and archived.`);
+    return;
+  }
+
+  if (action === "reopen") {
+    if (ticket.status !== "closed") {
+      await replyPrivately(interaction, `Ticket #${ticket.id} is already open.`);
+      return;
+    }
+
+    const otherOpenTicket = await findOpenTicketForUser(
+      guild.id,
+      ticket.openerUserId,
+    );
+    if (otherOpenTicket && otherOpenTicket.id !== ticket.id) {
+      throw new Error(
+        `This member already has another open ticket: <#${otherOpenTicket.channelId}>.`,
+      );
+    }
+
+    await channel.permissionOverwrites.edit(ticket.openerUserId, {
+      SendMessages: true,
+      AttachFiles: true,
+      AddReactions: true,
+    });
+    await channel.permissionOverwrites.edit(ticket.supportRoleId, {
+      SendMessages: true,
+      AttachFiles: true,
+      AddReactions: true,
+    });
+
+    const reopened = await reopenTicket(ticket.id);
+    if (!reopened) {
+      await channel.permissionOverwrites.edit(ticket.openerUserId, {
+        SendMessages: false,
+        AttachFiles: false,
+        AddReactions: false,
+      });
+      await channel.permissionOverwrites.edit(ticket.supportRoleId, {
+        SendMessages: false,
+        AttachFiles: false,
+        AddReactions: false,
+      });
+      throw new Error("This ticket could not be reopened.");
+    }
+
+    await channel.setName(ticketChannelName(ticket.openerUserId));
+    await channel.send({
+      content: `Ticket #${ticket.id} was reopened by <@${interaction.user.id}>.`,
+      components: [ticketActionRow(ticket.id)],
+      allowedMentions: { users: [interaction.user.id] },
+    });
+    await replyPrivately(interaction, `Ticket #${ticket.id} is open again.`);
+    return;
+  }
+
+  throw new Error("This ticket action is not recognized.");
 }
 
 async function handleCommand(
@@ -283,6 +679,46 @@ async function handleCommand(
       return;
     }
 
+    case "ticket-config": {
+      requirePermission(interaction, PermissionFlagsBits.ManageGuild, "Manage Server");
+      const subcommand = interaction.options.getSubcommand();
+
+      if (subcommand === "support-role") {
+        const role = interaction.options.getRole("role", true);
+        if (role.id === guild.id) {
+          throw new Error("Choose a support team role, not @everyone.");
+        }
+        await saveTicketSupportRole(guild.id, role.id);
+        await replyPrivately(interaction, `Ticket support role set to <@&${role.id}>.`);
+        return;
+      }
+
+      if (subcommand === "category") {
+        const category = interaction.options.getChannel("category");
+        await saveTicketCategory(guild.id, category?.id ?? null);
+        await replyPrivately(
+          interaction,
+          category
+            ? `New tickets will be created in <#${category.id}>.`
+            : "The ticket category was cleared. New tickets will be created outside a category.",
+        );
+        return;
+      }
+
+      const settings = await getTicketSettings(guild.id);
+      await replyPrivately(
+        interaction,
+        `Support role: ${settings.supportRoleId ? `<@&${settings.supportRoleId}>` : "not set"} · ` +
+          `Category: ${settings.categoryId ? `<#${settings.categoryId}>` : "not set"}`,
+      );
+      return;
+    }
+
+    case "ticket-panel": {
+      await postTicketPanel(interaction);
+      return;
+    }
+
     default:
       throw new Error("This command is not recognized.");
   }
@@ -370,18 +806,45 @@ async function main(): Promise<void> {
   });
 
   client.on(Events.InteractionCreate, (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    void handleCommand(client, interaction).catch(async (error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "The command could not be completed.";
-      logger.error(
-        { err: error, command: interaction.commandName },
-        "Discord command failed",
-      );
-      await replyPrivately(interaction, message).catch((replyError: unknown) => {
-        logger.error({ err: replyError }, "Could not send command error response");
+    if (interaction.isChatInputCommand()) {
+      void handleCommand(client, interaction).catch(async (error: unknown) => {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "The command could not be completed.";
+        logger.error(
+          { err: error, command: interaction.commandName },
+          "Discord command failed",
+        );
+        await replyPrivately(interaction, message).catch((replyError: unknown) => {
+          logger.error({ err: replyError }, "Could not send command error response");
+        });
       });
-    });
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("ticket:")) {
+      void handleTicketButton(client, interaction).catch(
+        async (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "The ticket action could not be completed.";
+          logger.error(
+            { err: error, customId: interaction.customId },
+            "Ticket button failed",
+          );
+          await replyPrivately(interaction, message).catch(
+            (replyError: unknown) => {
+              logger.error(
+                { err: replyError },
+                "Could not send ticket error response",
+              );
+            },
+          );
+        },
+      );
+    }
   });
 
   client.on(Events.MessageCreate, (message) => {

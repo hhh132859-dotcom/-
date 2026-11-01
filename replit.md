@@ -25,19 +25,22 @@ Discord server bot with moderation slash commands, configurable anti-spam timeou
 
 - Discord commands and event handlers: `scripts/src/discord-moderation-bot.ts`
 - Persistent moderation schema: `lib/db/src/schema/moderation.ts`
+- Ticket storage helpers: `scripts/src/discord-bot/storage.ts`
 - Bot setup guide: `docs/discord-moderation-bot.md`
 
 ## Architecture decisions
 
 - The bot runs as a separate background workflow so the shared API server remains independent.
 - Anti-spam counts messages without reading their contents, so the privileged Message Content intent is not needed.
-- Guild settings and moderation cases are stored in PostgreSQL.
+- Guild settings, moderation cases, and support tickets are stored in PostgreSQL.
+- Each member can have one open ticket per server; closing locks and archives its channel instead of deleting it.
 
 ## Product
 
 - `/warn`, `/timeout`, `/kick`, and `/clear` moderation commands.
 - `/mod-config` controls per-server spam thresholds and the moderation log channel.
 - Automatic timeout after the configured spam threshold is reached.
+- `/ticket-panel` posts a persistent button panel; `/ticket-config` sets the support role and optional category.
 
 ## User preferences
 
@@ -45,7 +48,7 @@ Discord server bot with moderation slash commands, configurable anti-spam timeou
 
 ## Gotchas
 
-- The bot needs the `applications.commands` and `bot` invite scopes, plus moderation and channel permissions.
+- The bot needs the `applications.commands` and `bot` invite scopes, plus Manage Channels, Embed Links, moderation, and channel permissions.
 - Global slash commands can take time to appear after first registration.
 
 ## Pointers

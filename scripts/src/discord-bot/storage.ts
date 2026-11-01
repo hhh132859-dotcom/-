@@ -28,6 +28,20 @@ export type CaseInput = {
   durationSeconds?: number | null;
 };
 
+export type TicketSettings = {
+  supportRoleId: string | null;
+  categoryId: string | null;
+};
+
+export type TicketRecord = {
+  id: number;
+  guildId: string;
+  channelId: string;
+  openerUserId: string;
+  supportRoleId: string;
+  status: "open" | "closed";
+};
+
 const defaultSettings: GuildSettings = {
   spamEnabled: true,
   spamThreshold: 5,
@@ -115,4 +129,130 @@ export async function saveCase(input: CaseInput): Promise<number> {
   }
 
   return row.id;
+}
+
+export async function getTicketSettings(
+  guildId: string,
+): Promise<TicketSettings> {
+  const result = await pool.query<TicketSettings>(
+    `SELECT
+       support_role_id AS "supportRoleId",
+       category_id AS "categoryId"
+     FROM ticket_settings
+     WHERE guild_id = $1`,
+    [guildId],
+  );
+  return result.rows[0] ?? { supportRoleId: null, categoryId: null };
+}
+
+export async function saveTicketSupportRole(
+  guildId: string,
+  roleId: string,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO ticket_settings (guild_id, support_role_id)
+     VALUES ($1, $2)
+     ON CONFLICT (guild_id) DO UPDATE SET
+       support_role_id = EXCLUDED.support_role_id,
+       updated_at = NOW()`,
+    [guildId, roleId],
+  );
+}
+
+export async function saveTicketCategory(
+  guildId: string,
+  categoryId: string | null,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO ticket_settings (guild_id, category_id)
+     VALUES ($1, $2)
+     ON CONFLICT (guild_id) DO UPDATE SET
+       category_id = EXCLUDED.category_id,
+       updated_at = NOW()`,
+    [guildId, categoryId],
+  );
+}
+
+export async function findOpenTicketForUser(
+  guildId: string,
+  openerUserId: string,
+): Promise<TicketRecord | null> {
+  const result = await pool.query<TicketRecord>(
+    `SELECT
+       id,
+       guild_id AS "guildId",
+       channel_id AS "channelId",
+       opener_user_id AS "openerUserId",
+       support_role_id AS "supportRoleId",
+       status
+     FROM support_tickets
+     WHERE guild_id = $1 AND opener_user_id = $2 AND status = 'open'
+     ORDER BY id DESC
+     LIMIT 1`,
+    [guildId, openerUserId],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getTicketById(
+  guildId: string,
+  ticketId: number,
+): Promise<TicketRecord | null> {
+  const result = await pool.query<TicketRecord>(
+    `SELECT
+       id,
+       guild_id AS "guildId",
+       channel_id AS "channelId",
+       opener_user_id AS "openerUserId",
+       support_role_id AS "supportRoleId",
+       status
+     FROM support_tickets
+     WHERE guild_id = $1 AND id = $2`,
+    [guildId, ticketId],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function createTicket(input: {
+  guildId: string;
+  channelId: string;
+  openerUserId: string;
+  supportRoleId: string;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO support_tickets (
+       guild_id, channel_id, opener_user_id, support_role_id
+     )
+     VALUES ($1, $2, $3, $4)
+     RETURNING id`,
+    [input.guildId, input.channelId, input.openerUserId, input.supportRoleId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error("The ticket could not be saved.");
+  return row.id;
+}
+
+export async function closeTicket(
+  ticketId: number,
+  closedByUserId: string | null,
+): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE support_tickets
+     SET status = 'closed', closed_at = NOW(), closed_by_user_id = $2
+     WHERE id = $1 AND status = 'open'
+     RETURNING id`,
+    [ticketId, closedByUserId],
+  );
+  return result.rowCount === 1;
+}
+
+export async function reopenTicket(ticketId: number): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE support_tickets
+     SET status = 'open', closed_at = NULL, closed_by_user_id = NULL
+     WHERE id = $1 AND status = 'closed'
+     RETURNING id`,
+    [ticketId],
+  );
+  return result.rowCount === 1;
 }
