@@ -1,15 +1,16 @@
-# [Project name]
+# Discord Moderation Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Discord server bot with moderation slash commands, configurable anti-spam timeouts, and persistent moderation records.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/scripts run bot` — run the Discord moderation bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `DISCORD_BOT_TOKEN`; `DATABASE_URL` is provided by the project.
 
 ## Stack
 
@@ -22,23 +23,30 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- Discord commands and event handlers: `scripts/src/discord-moderation-bot.ts`
+- Persistent moderation schema: `lib/db/src/schema/moderation.ts`
+- Bot setup guide: `docs/discord-moderation-bot.md`
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The bot runs as a separate background workflow so the shared API server remains independent.
+- Anti-spam counts messages without reading their contents, so the privileged Message Content intent is not needed.
+- Guild settings and moderation cases are stored in PostgreSQL.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- `/warn`, `/timeout`, `/kick`, and `/clear` moderation commands.
+- `/mod-config` controls per-server spam thresholds and the moderation log channel.
+- Automatic timeout after the configured spam threshold is reached.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+-
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- The bot needs the `applications.commands` and `bot` invite scopes, plus moderation and channel permissions.
+- Global slash commands can take time to appear after first registration.
 
 ## Pointers
 
