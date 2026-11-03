@@ -8,6 +8,7 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  Partials,
   PermissionFlagsBits,
   type ChatInputCommandInteraction,
   type ButtonInteraction,
@@ -722,11 +723,13 @@ async function handleCommand(
 }
 
 async function handleMessage(client: DiscordClient, message: Message): Promise<void> {
-  if (!message.guild || message.author.bot) return;
+  if (message.author.bot) return;
 
   if (message.content.startsWith("$hello")) {
     await message.reply("Hello!");
   }
+
+  if (!message.guild) return;
 
   const guildId = message.guild.id;
   const userId = message.author.id;
@@ -787,8 +790,10 @@ async function main(): Promise<void> {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
     ],
+    partials: [Partials.Channel],
   });
 
   client.once(Events.ClientReady, async (readyClient) => {
