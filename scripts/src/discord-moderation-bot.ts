@@ -724,6 +724,10 @@ async function handleCommand(
 async function handleMessage(client: DiscordClient, message: Message): Promise<void> {
   if (!message.guild || message.author.bot) return;
 
+  if (message.content.startsWith("$hello")) {
+    await message.reply("Hello!");
+  }
+
   const guildId = message.guild.id;
   const userId = message.author.id;
   const key = `${guildId}:${userId}`;
@@ -780,7 +784,11 @@ async function main(): Promise<void> {
   }
 
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+    ],
   });
 
   client.once(Events.ClientReady, async (readyClient) => {
